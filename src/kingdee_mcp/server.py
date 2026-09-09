@@ -1,7 +1,10 @@
 """
 金蝶云星空 MCP Server
 支持模块：供应链（采购/销售）、库存（出入库/即时库存）、基础资料（物料/客户/供应商）
-认证方式：私有云 WebAPI + ValidateUser（账号密码）登录拿 SessionId，后续请求带 Cookie。仅支持账号密码登录，不使用第三方应用授权。
+认证方式：私有云 WebAPI 登录拿 SessionId，后续请求带 Cookie。支持两种登录方式（二选一，账号密码优先）：
+  1. ValidateUser（账号密码）—— 以真实用户身份执行，携带该用户业务权限，推荐使用；
+  2. LoginByAppSecret（第三方应用授权，AppID+AppSecret）—— 以应用身份登录，不携带真实用户权限，
+     报表等依赖数据权限的查询会受限；仅当未配置密码时作为备选。
 SQL Server 探查：系统目录只读查询，辅助理解数据库结构（可选功能）
 Harness 层：操作链约束（harness/）、反馈循环、结构化退出条件、失败追溯
 """
@@ -570,7 +573,9 @@ mcp = FastMCP("kingdee_mcp")
 SERVER_URL = os.getenv("KINGDEE_SERVER_URL", "http://your-server/k3cloud/")
 ACCT_ID    = os.getenv("KINGDEE_ACCT_ID", "")
 USERNAME   = os.getenv("KINGDEE_USERNAME", "")
-PASSWORD   = os.getenv("KINGDEE_PASSWORD", "")   # 账号密码登录(ValidateUser)，必填，不使用第三方应用授权
+PASSWORD   = os.getenv("KINGDEE_PASSWORD", "")   # 账号密码登录(ValidateUser)
+APP_ID     = os.getenv("KINGDEE_APP_ID", "")     # 第三方应用授权登录(LoginByAppSecret)
+APP_SEC    = os.getenv("KINGDEE_APP_SEC", "")    # 与 APP_ID 搭配使用；两种登录方式二选一，PASSWORD 优先
 LCID       = int(os.getenv("KINGDEE_LCID", "2052"))
 
 # ─────────────────────────────────────────────
@@ -640,7 +645,8 @@ async def kingdee_usage_stats() -> str:
 
 # WebAPI 端点路径
 _EP = {
-    "login_user": "Kingdee.BOS.WebApi.ServicesStub.AuthService.ValidateUser.common.kdsvc",
+    "login_user":   "Kingdee.BOS.WebApi.ServicesStub.AuthService.ValidateUser.common.kdsvc",
+    "login_secret": "Kingdee.BOS.WebApi.ServicesStub.AuthService.LoginByAppSecret.common.kdsvc",
     "query":   "Kingdee.BOS.WebApi.ServicesStub.DynamicFormService.ExecuteBillQuery.common.kdsvc",
     "view":    "Kingdee.BOS.WebApi.ServicesStub.DynamicFormService.View.common.kdsvc",
     "save":    "Kingdee.BOS.WebApi.ServicesStub.DynamicFormService.Save.common.kdsvc",
@@ -1616,23 +1622,30 @@ def _url(ep_key: str) -> str:
 async def _login() -> str:
     """登录金蝶，返回 SessionId，失败抛异常。
 
-    仅支持账号密码登录 ValidateUser(acctID, username, password, lcid)，
-    不使用第三方应用授权（LoginByAppSecret）：账号密码登录以真实用户身份执行
-    WebAPI，会携带该用户自身的业务权限（含数据权限控制）；应用授权方式不携带
-    真实用户权限，报表等依赖数据权限的查询会受应用授权范围限制。
+    支持两种登录方式（二选一，账号密码优先）：
+      1. 账号密码登录 ValidateUser(acctID, username, password, lcid) —— 以真实用户身份
+         执行 WebAPI，会携带该用户自身的业务权限（含数据权限控制），推荐使用。
+      2. 第三方应用授权 LoginByAppSecret(acctID, username, appId, appSecret, lcid) ——
+         以应用身份登录，不携带真实用户权限，报表等依赖数据权限的查询会受应用授权
+         范围限制；仅当账号密码未配置、且已配置 KINGDEE_APP_ID/KINGDEE_APP_SEC 时使用。
     """
     global _session_id
-    if not PASSWORD:
+    if PASSWORD:
+        ep_key = "login_user"
+        payload = {"parameters": [ACCT_ID, USERNAME, PASSWORD, LCID]}
+    elif APP_ID and APP_SEC:
+        ep_key = "login_secret"
+        payload = {"parameters": [ACCT_ID, USERNAME, APP_ID, APP_SEC, LCID]}
+    else:
         raise RuntimeError(
-            "未配置 KINGDEE_PASSWORD，无法登录。本服务仅支持账号密码登录"
-            "（ValidateUser），请在环境变量中设置金蝶账号的登录密码。"
+            "未配置登录凭据，无法登录。请配置 KINGDEE_PASSWORD（账号密码登录，推荐），"
+            "或配置 KINGDEE_APP_ID + KINGDEE_APP_SEC（第三方应用授权登录）。"
         )
-    payload = {"parameters": [ACCT_ID, USERNAME, PASSWORD, LCID]}
     # 💡 REMEMBER: httpx 0.28+ 默认 HTTP/2，金蝶不支持，必须显式传 http1=True，否则全 502
     async with httpx.AsyncClient(timeout=30, proxy=None,
                                   transport=httpx.AsyncHTTPTransport(http1=True)) as client:
         resp = await client.post(
-            _url("login_user"),
+            _url(ep_key),
             json=payload,
             headers={"Content-Type": "application/json"},
         )
@@ -6653,21 +6666,26 @@ def _run_check() -> int:
     """跑一次登录验证当前环境变量配置是否正确，返回 exit code"""
     import asyncio
 
-    required = {
+    base_required = {
         "KINGDEE_SERVER_URL": SERVER_URL,
         "KINGDEE_ACCT_ID":    ACCT_ID,
         "KINGDEE_USERNAME":   USERNAME,
-        "KINGDEE_PASSWORD":   PASSWORD,
     }
-    missing = [k for k, v in required.items() if not v or v == "http://your-server/k3cloud/"]
-    if missing:
+    missing_base = [k for k, v in base_required.items() if not v or v == "http://your-server/k3cloud/"]
+    has_password = bool(PASSWORD)
+    has_app_secret = bool(APP_ID and APP_SEC)
+    if missing_base or not (has_password or has_app_secret):
+        missing = list(missing_base)
+        if not (has_password or has_app_secret):
+            missing.append("KINGDEE_PASSWORD 或 (KINGDEE_APP_ID + KINGDEE_APP_SEC)")
         print("[FAIL] 缺少环境变量: " + ", ".join(missing))
-        print("      本服务仅支持账号密码登录(ValidateUser)，需配置以上四项，"
-              "第三方应用授权(APP_ID/APP_SEC)已不再使用。")
+        print("      支持两种登录方式：账号密码(ValidateUser，推荐) 或 第三方应用授权"
+              "(LoginByAppSecret)，二选一即可。")
         return 1
 
+    auth_mode = "账号密码(ValidateUser)" if has_password else "第三方应用授权(LoginByAppSecret)"
     print(f"[INFO] 服务器: {SERVER_URL}")
-    print(f"[INFO] 账套: {ACCT_ID}  用户: {USERNAME}  登录方式: 账号密码(ValidateUser)")
+    print(f"[INFO] 账套: {ACCT_ID}  用户: {USERNAME}  登录方式: {auth_mode}")
     print("[INFO] 正在尝试登录金蝶...")
     try:
         sid = asyncio.run(_login())
@@ -6680,7 +6698,11 @@ def _run_check() -> int:
         return 2
     except RuntimeError as e:
         print(f"[FAIL] {e}")
-        print("       请检查 ACCT_ID / USERNAME / PASSWORD 是否正确，账号是否被禁用。")
+        if has_password:
+            print("       请检查 ACCT_ID / USERNAME / PASSWORD 是否正确，账号是否被禁用。")
+        else:
+            print("       请检查 ACCT_ID / USERNAME / APP_ID / APP_SEC 是否正确，"
+                  "集成用户是否启用、应用是否已授权该用户登录。")
         return 3
     except Exception as e:
         print(f"[FAIL] 未知错误: {type(e).__name__}: {e}")

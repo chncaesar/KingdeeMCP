@@ -59,7 +59,7 @@ AI 会自动调用金蝶 API 完成操作，无需手动登录 ERP 界面。
 - **自然语言操作**：用中文直接描述需求，AI 自动转换为 API 调用
 - **异步高性能**：基于 async/await，支持并发请求
 - **自动重试**：Session 过期自动重登，连接失败自动重试
-- **安全认证**：采用金蝶官方 WebAPI 认证，账号密码(ValidateUser)登录，兼容公有云和私有云，无第三方应用授权
+- **安全认证**：采用金蝶官方 WebAPI 认证，支持账号密码(ValidateUser)登录或第三方应用授权(LoginByAppSecret)登录，二选一，兼容公有云和私有云
 - **类型安全**：基于 Pydantic 数据验证，参数自动补全
 - **易于扩展**：基于 FastMCP 框架，轻松添加自定义工具
 - **使用示例**：提供 [9 个常见业务场景示例](./examples/)，覆盖查询、新建、审核、下推等操作
@@ -81,12 +81,14 @@ uvx kingdee-mcp
 ### 第一步：金蝶云星空后台授权
 
 1. 准备一个金蝶云星空账号（建议专用集成账号，**不要用 Administrator**）
-2. 本服务采用**账号密码(ValidateUser)**登录，**无需**创建第三方应用、也无需 AppID / AppSecret
+2. 本服务支持两种登录方式，二选一：
+   - **账号密码(ValidateUser)**（推荐）：无需创建第三方应用、无需 AppID / AppSecret，以真实用户身份执行，携带该用户完整业务权限；
+   - **第三方应用授权(LoginByAppSecret)**：需在金蝶【集成管理】创建第三方应用获取 AppID / AppSecret，并将该应用授权给对应用户登录；以应用身份执行，报表等依赖数据权限的查询可能受限。
 3. 为该账号分配所需模块的操作权限
 
 ### 第二步：配置 MCP 客户端
 
-在你的 MCP 客户端配置文件中添加以下内容：
+在你的 MCP 客户端配置文件中添加以下内容（**方式一：账号密码，推荐**）：
 
 ```json
 {
@@ -104,6 +106,28 @@ uvx kingdee-mcp
   }
 }
 ```
+
+**方式二：第三方应用授权**（不想使用账号密码时的备选，去掉 `KINGDEE_PASSWORD`，改用 `KINGDEE_APP_ID` / `KINGDEE_APP_SEC`）：
+
+```json
+{
+  "mcpServers": {
+    "kingdee": {
+      "command": "uvx",
+      "args": ["kingdee-mcp"],
+      "env": {
+        "KINGDEE_SERVER_URL": "http://your-server/k3cloud/",
+        "KINGDEE_ACCT_ID": "你的账套ID",
+        "KINGDEE_USERNAME": "金蝶账号",
+        "KINGDEE_APP_ID": "AppID",
+        "KINGDEE_APP_SEC": "AppSecret"
+      }
+    }
+  }
+}
+```
+
+> 两种方式二选一即可，无需同时配置。若同时配置了 `KINGDEE_PASSWORD` 和 `KINGDEE_APP_ID`/`KINGDEE_APP_SEC`，服务会优先使用账号密码登录。
 
 **配置文件位置：**
 
@@ -128,24 +152,16 @@ uvx kingdee-mcp
 | `KINGDEE_SERVER_URL` | 金蝶服务器地址（需包含 /k3cloud/） | `http://your-server/k3cloud/` |
 | `KINGDEE_ACCT_ID` | 账套ID | `your-acct-id` |
 | `KINGDEE_USERNAME` | 金蝶账号 | `your-username` |
-| `KINGDEE_PASSWORD` | 金蝶账号密码（ValidateUser 登录，必填） | `your-password` |
+| `KINGDEE_PASSWORD` | 金蝶账号密码（ValidateUser 登录，推荐，与 APP_ID/APP_SEC 二选一） | `your-password` |
+| `KINGDEE_APP_ID` | 第三方应用 AppID（LoginByAppSecret 登录，与 PASSWORD 二选一） | `your-app-id` |
+| `KINGDEE_APP_SEC` | 第三方应用 AppSecret（与 APP_ID 搭配使用） | `your-app-secret` |
 | `MCP_SQLSERVER_HOST` | SQL Server 主机（可选，用于数据库探查） | `localhost` |
 | `MCP_SQLSERVER_PORT` | SQL Server 端口（默认 1433） | `1433` |
 | `MCP_SQLSERVER_DATABASE` | 数据库名 | `AIS20260309171043` |
 | `MCP_SQLSERVER_USER` | SQL Server 用户（建议只读账号） | `sa` |
 | `MCP_SQLSERVER_PASSWORD` | SQL Server 密码 | `xxxx` |
 
-## ⚠️ 从 0.1.0 升级的破坏性变更（重要）
-
-**0.2.0 起，登录方式从「第三方应用授权（AppID + AppSecret）」改为「账号密码（ValidateUser）」**，旧版的 `KINGDEE_APP_ID` / `KINGDEE_APP_SEC` 环境变量**已失效**。
-
-如果你之前的 MCP 客户端配置里用的是 AppID / AppSecret，升级后会出现登录失败。请按以下方式迁移：
-
-1. 在金蝶云星空创建一个专用集成账号（不要用 Administrator）；
-2. 把 MCP 配置里的环境变量改为：**删除** `KINGDEE_APP_ID`、`KINGDEE_APP_SEC`，**新增** `KINGDEE_PASSWORD` = 该集成账号的密码；
-3. 重启 MCP 客户端。
-
-> 之所以改用账号密码，是因为账号密码(ValidateUser) 是以真实用户身份执行 WebAPI、会携带该用户自身的业务权限（含 WebApi 数据权限控制）；而第三方应用授权(LoginByAppSecret) 以应用身份登录、不携带真实用户权限，报表等依赖数据权限的查询会受应用授权范围限制，无法按用户权限正常执行。
+> `KINGDEE_PASSWORD` 与 `KINGDEE_APP_ID`/`KINGDEE_APP_SEC` 二选一即可，不必同时配置。同时配置时优先使用账号密码登录。账号密码(ValidateUser) 是以真实用户身份执行 WebAPI、携带该用户自身的业务权限（含数据权限控制）；第三方应用授权(LoginByAppSecret) 以应用身份登录、不携带真实用户权限，报表等依赖数据权限的查询会受应用授权范围限制。
 
 ## 可用工具列表
 
@@ -251,13 +267,13 @@ uvx kingdee-mcp
 ## 常见问题
 
 **Q: 提示认证失败怎么办？**
-检查金蝶账号与密码(KINGDEE_PASSWORD)是否正确，该账号是否有对应模块的操作权限。
+若用账号密码登录，检查金蝶账号与密码(KINGDEE_PASSWORD)是否正确；若用第三方应用授权登录，检查 AppID/AppSecret(KINGDEE_APP_ID/KINGDEE_APP_SEC) 是否正确、该应用是否已授权该用户登录；两种方式都需确认账号有对应模块的操作权限。
 
 **Q: 连接超时怎么解决？**
 检查 `KINGDEE_SERVER_URL` 是否正确（需包含 `/k3cloud/` 后缀），确保服务器可访问。
 
 **Q: 支持金蝶云星空公有云吗？**
-支持。公有云和私有云使用相同的账号密码(ValidateUser)认证方式，配置方式完全一致。
+支持。公有云和私有云使用相同的认证方式（账号密码或第三方应用授权），配置方式完全一致。
 
 **Q: 用 `uvx kingdee-mcp` 启动时报 `No module named 'mcp.server.fastmcp'`？**
 

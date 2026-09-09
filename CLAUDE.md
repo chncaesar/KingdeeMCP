@@ -84,8 +84,9 @@ This is a single-file MCP Server (`src/kingdee_mcp/server.py`) that bridges AI c
 | `KINGDEE_SERVER_URL` | Server URL ending in `/k3cloud/` |
 | `KINGDEE_ACCT_ID` | Account set ID |
 | `KINGDEE_USERNAME` | Integration user name |
-| `KINGDEE_APP_ID` | App ID from Kingdee admin |
-| `KINGDEE_APP_SEC` | App Secret from Kingdee admin |
+| `KINGDEE_PASSWORD` | Password for ValidateUser login (recommended; alternative to APP_ID/APP_SEC) |
+| `KINGDEE_APP_ID` | App ID for LoginByAppSecret login (alternative to PASSWORD) |
+| `KINGDEE_APP_SEC` | App Secret paired with APP_ID |
 | `MCP_SQLSERVER_HOST` | SQL Server host (optional, for DB introspection) |
 | `MCP_SQLSERVER_PORT` | SQL Server port (default 1433) |
 | `MCP_SQLSERVER_DATABASE` | Database name |

@@ -14,11 +14,12 @@ description: 基于已连接的 kingdee-mcp（金蝶云星空 MCP 服务器）�
   - `KINGDEE_SERVER_URL`：金蝶服务器地址，**必须包含 `/k3cloud/`** 后缀
   - `KINGDEE_ACCT_ID`：账套 ID
   - `KINGDEE_USERNAME`：金蝶账号（建议专用集成账号，不要 Administrator）
-  - `KINGDEE_PASSWORD`：账号密码（ValidateUser 登录，**必填**）
+  - `KINGDEE_PASSWORD`：账号密码（ValidateUser 登录，推荐，与下方 APP_ID/APP_SEC 二选一）
 - 可选：
+  - `KINGDEE_APP_ID` / `KINGDEE_APP_SEC`：第三方应用授权登录（LoginByAppSecret），与 PASSWORD 二选一
   - `KINGDEE_LCID`：语言区，默认 `2052`（简体中文）
   - `MCP_SQLSERVER_*`：SQL Server 主机/端口/库/账号，启用数据库探查工具
-- 认证方式：金蝶官方 WebAPI **账号密码(ValidateUser)**，无需 AppID / AppSecret。
+- 认证方式：金蝶官方 WebAPI **账号密码(ValidateUser)**（推荐）或**第三方应用授权(LoginByAppSecret)**，二选一即可。
 - 若尚未配置，请把仓库 `examples/workbuddy-mcp-config.example.json` 中的 `kingdee` 片段加入用户级 `~/.workbuddy/mcp.json`（替换占位符），重启 WorkBuddy 后再用本技能。
 
 ## 二、触发示例

@@ -10,8 +10,10 @@ HAS_KINGDEE_CONFIG = bool(
     os.getenv("KINGDEE_SERVER_URL") and
     os.getenv("KINGDEE_ACCT_ID") and
     os.getenv("KINGDEE_USERNAME") and
-    os.getenv("KINGDEE_APP_ID") and
-    os.getenv("KINGDEE_APP_SEC")
+    (
+        os.getenv("KINGDEE_PASSWORD") or
+        (os.getenv("KINGDEE_APP_ID") and os.getenv("KINGDEE_APP_SEC"))
+    )
 )
 
 
