@@ -106,18 +106,22 @@
 | 提交 (Submit) | 提交单据 | POST |
 | 审核 (Audit) | 审核单据 | POST |
 | 反审核 (UnAudit) | 取消审核 | POST |
-| 撤销 (Cancel) | 撤销操作 | POST |
+| 禁用 (Forbid) | 基础资料禁用 | POST |
+| 反禁用 (Enable) | 基础资料反禁用 | POST |
+| 撤销 (CancelAssign) | 撤销操作 | POST |
 | 下推 (Push) | 下推到下游单据 | POST |
-| 作废 (Invalid) | 作废单据 | POST |
+| 作废 (Cancel) | 作废单据 | POST |
 | 反作废 (UnInvalid) | 取消作废 | POST |
 | 业务关闭 (Close) | 关闭业务 | POST |
 | 反业务关闭 (UnClose) | 取消关闭 | POST |
 | 业务终止 (Terminate) | 终止业务 | POST |
 | 反业务终止 (UnTerminate) | 取消终止 | POST |
-| 整单关闭 (BatchClose) | 整单关闭 | POST |
-| 整单反关闭 (BatchUnClose) | 取消整单关闭 | POST |
+| 整单关闭 (YLBillClose/BillClose) | 整单关闭 | POST |
+| 整单反关闭 (YLUnBillClose/Unclose) | 取消整单关闭 | POST |
 | 批量保存 (BatchSave) | 批量保存 | POST |
 | 单据查询 (ExecuteBillQuery) | 查询单据列表 | POST |
+
+> **2026-08-07 真机修正，依据：元数据 OperationNumber + OperationNumberConst.cs 反编译 + ExecuteOperation 实测**：撤销=CancelAssign（非 Cancel）、作废=Cancel（非 Invalid，全库无 Invalid 常量）、整单关闭=YLBillClose/BillClose（非 BatchClose）、反关闭=YLUnBillClose/Unclose（非 BatchUnClose）、禁用=Forbid、反禁用=Enable（非 UnForbid；Disable 已废弃）。端点正确拼写为 `ExecuteOperation`（`Kingdee.BOS.WebApi.ServicesStub.DynamicFormService.ExecuteOperation.common.kdsvc`），`ExcuteOperation` 为官方论坛拼写错误。
 
 ## 四、接口调用方式
 

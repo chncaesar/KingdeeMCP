@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 import httpx
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.prompts.base import UserMessage
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # ─────────────────────────────────────────────
 # 使用日志模块（改进反馈层）
@@ -655,6 +655,15 @@ _EP = {
     "unaudit": "Kingdee.BOS.WebApi.ServicesStub.DynamicFormService.UnAudit.common.kdsvc",
     "delete":  "Kingdee.BOS.WebApi.ServicesStub.DynamicFormService.Delete.common.kdsvc",
     "push":    "Kingdee.BOS.WebApi.ServicesStub.DynamicFormService.Push.common.kdsvc",
+    # 标准动作执行（撤销/作废/整单关闭/反关闭/禁用/反禁用等）：
+    # ⚠️ 端点名：服务端真正认的是 ExecuteOperation（2026-08-07 QA 严过关真机实测；
+    #    旧拼写 ExcuteOperation 虽返回 HTTP200 但实际空引用，勿再用）。
+    # 请求体格式（真机实测）：{"formid":"...","opNumber":"Cancel","data":"{\"Ids\":\"...\"}"}
+    #   opNumber 在顶层（与 formid 平级）；data 是业务参数 JSON 字符串，不含 Operation。
+    "execute": "Kingdee.BOS.WebApi.ServicesStub.DynamicFormService.ExecuteOperation.common.kdsvc",
+    # 撤销专用端点（CancelAssign）：无需 opNumber，data={"Ids":"1,2,3"} 或 {"Numbers":[...]}。
+    # 2026-08-07 QA 严过关真机验证 B→D 成功，比走 ExecuteOperation 更简单直接。
+    "cancel_assign": "Kingdee.BOS.WebApi.ServicesStub.DynamicFormService.CancelAssign.common.kdsvc",
     "user":         "Kingdee.BOS.WebApi.ServicesStub.UserService.QueryUser.common.kdsvc",
     "role":         "Kingdee.BOS.WebApi.ServicesStub.RoleService.QueryRole.common.kdsvc",
     "permission":   "Kingdee.BOS.WebApi.ServicesStub.PermissionService.QueryPermission.common.kdsvc",
@@ -1144,7 +1153,7 @@ FORM_CATALOG = {
             "FMaterialId.FName,FMaterialId.FNumber,FQty,"
             "FReceiveQty,FStockInQty"
         ),
-        "db_tables": ("T_PUR_PURCHASEORDER", "T_PUR_POORDERENTRY"),
+        "db_tables": ("T_PUR_POORDER", "T_PUR_POORDERENTRY"),
         "business_rules": {
             "FReceiveQty": "累计收料数量（收料单审核时累加，反审核时扣减）",
             "FStockInQty": "累计入库数量（入库单审核时累加，反审核时扣减）",
@@ -1800,12 +1809,16 @@ async def _post(ep_key: str, payload: Any) -> Any:
 async def _post_raw(ep_key: str, form_id: str, model: dict,
                      need_update_fields: Optional[List[str]] = None,
                      need_return_fields: Optional[List[str]] = None,
-                     is_delete_entry: bool = True) -> Any:
-    """带自动重新登录的 raw JSON 调用（用于 Save/View/Submit/Audit/Push 等写操作）
+                     is_delete_entry: bool = True,
+                     op_number: Optional[str] = None) -> Any:
+    """带自动重新登录的 raw JSON 调用（用于 Save/View/Submit/Audit/Push/Execute 等写操作）
 
     Kingdee WebAPI 写接口使用小写 formid + 嵌套 data 对象格式。
     - Save/View/Submit/Audit/Delete: data={"Model": {...}, NeedUpDateFields:[], ...}
     - Push: data={"TargetFormId":"...","Numbers":[...],"RuleId":"..."}  （无 Model 包装）
+    - Execute (ExecuteOperation): body={"formid":"...","opNumber":"...","data":"{\"Ids\":...}"}
+      —— opNumber 顶层、data 为业务参数 JSON 字符串（QA 严过关 2026-08-07 真机实测格式）
+    - CancelAssign: body={"formid":"...","data":"{\"Ids\":...}"}，无需 opNumber
     """
     global _session_id
     start_time = time.perf_counter()
@@ -1820,15 +1833,31 @@ async def _post_raw(ep_key: str, form_id: str, model: dict,
     # Push: data 直接放字段，不需要 Model 包装
     # Submit/Audit/Unaudiot/Delete: data 里面直接是 {"Ids": ...}，不需要 Model 包装
     # View: data 里面直接是 {"Id": ...}，不需要 Model 包装
+    # Execute (ExecuteOperation): opNumber 顶层，data 只放业务参数（Ids 逗号拼接字符串，勿拆单）
+    # CancelAssign: data 直接放业务参数，无需 opNumber
     # Save: 需要 Model 包装
     # 注意：Kingdee WebAPI 中 data 字段始终是 JSON 字符串，不是对象
-    if ep_key in ("push", "submit", "audit", "unaudit", "delete", "view"):
+    if ep_key == "execute":
+        # ExecuteOperation：opNumber 顶层、data 为业务参数 JSON 字符串
+        if op_number is None:
+            raise RuntimeError("execute 端点必须提供 opNumber（操作编码）")
+        data_obj = dict(model)
+        body_obj = {
+            "formid": form_id,
+            "opNumber": op_number,
+            "data": json.dumps(data_obj, ensure_ascii=False),
+        }
+    elif ep_key == "cancel_assign":
+        # CancelAssign：无需 opNumber
+        data_obj = dict(model)
+        body_obj = {"formid": form_id, "data": json.dumps(data_obj, ensure_ascii=False)}
+    elif ep_key in ("push", "submit", "audit", "unaudit", "delete", "view"):
         data_obj = dict(model)
         # 💡 REMEMBER: Submit/Audit/Unaudiot/Delete 的 Ids 必须是单个字符串 {"Ids":"100"}，不是数组
-        # Submit/Audit/Unaudiot/Delete: Ids 必须是单个字符串（FID），不是数组
         if ep_key in ("submit", "audit", "unaudit", "delete") and "Ids" in data_obj:
             ids = data_obj["Ids"]
             data_obj["Ids"] = ids[0] if isinstance(ids, (list, tuple)) else ids
+        body_obj = {"formid": form_id, "data": json.dumps(data_obj, ensure_ascii=False)}
     else:
         data_obj = {"Model": model}
         if need_update_fields:
@@ -1840,12 +1869,12 @@ async def _post_raw(ep_key: str, form_id: str, model: dict,
             data_obj["IsVerifyBaseDataField"] = "false"
             data_obj["IsAutoSubmitAndAudit"] = "false"
             data_obj["ValidateRepeatJson"] = "false"
+        body_obj = {"formid": form_id, "data": json.dumps(data_obj, ensure_ascii=False)}
 
     # Kingdee WebAPI 格式（raw JSON body）：
-    #   {"formid": "...", "data": "{\"Model\":{...}}"}
+    #   {"formid": "...", "data": "{\"Model\":{...}}"}  （execute 额外带顶层 opNumber）
     # 💡 REMEMBER: data 字段是 JSON 字符串，只需一次 json.dumps；双重 dumps 会导致 API 报 502 或参数错误
-    # Kingdee WebAPI 格式（raw JSON body）：{"formid": "...", "data": "{\"Model\":{...}}"}
-    body_str = json.dumps({"formid": form_id, "data": json.dumps(data_obj, ensure_ascii=False)}, ensure_ascii=False)
+    body_str = json.dumps(body_obj, ensure_ascii=False)
 
     success = False
     error_msg = ""
@@ -3177,6 +3206,348 @@ async def kingdee_delete_bills(params: BillIdsInput) -> str:
         })
     except Exception as e:
         return _err(e, op="delete")
+
+
+# ─────────────────────────────────────────────
+# 标准动作执行工具（ExecuteOperation / CancelAssign）
+# 撤销 / 作废 / 整单关闭 / 反关闭 / 禁用 / 反禁用
+# action 依据：范探源 2026-08-07 三重证据查证（元数据 OperationNumber +
+# OperationNumberConst.cs 反编译 + 官方论坛/第三方实测）。
+# 端点：Kingdee.BOS.WebApi.ServicesStub.DynamicFormService.ExecuteOperation.common.kdsvc
+#   （⚠️ 服务端真正认 ExecuteOperation，QA 严过关 2026-08-07 真机实测；
+#     旧拼写 ExcuteOperation 虽 HTTP200 但实际空引用）。
+# 请求体：opNumber 在顶层（与 formid 平级），data 为业务参数 JSON 字符串（不含 Operation）；
+#   撤销（kingdee_cancel_bills）走独立端点 CancelAssign（无需 opNumber）。
+# ─────────────────────────────────────────────
+
+class ExecuteActionInput(BaseModel):
+    """ExecuteOperation / CancelAssign 标准动作输入（撤销/作废/整单关闭/反关闭/禁用/反禁用等）。
+
+    bill_ids 与 bill_nos 至少提供一个；都传时优先用 bill_ids（Ids 逗号拼接）。
+    """
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    form_id: str = Field(
+        ..., description="单据/基础资料 FormId，如 SAL_SaleOrder、PUR_Requisition、BD_Customer"
+    )
+    bill_ids: Optional[List[str]] = Field(
+        default=None, description="单据内码 FID 列表（优先），如 ['100123'] 或 ['100123','100124']"
+    )
+    bill_nos: Optional[List[str]] = Field(
+        default=None, description="单据编号 FBillNo 列表，如 ['CGDD000025']（bill_ids 未提供时使用）"
+    )
+    operation: Optional[str] = Field(
+        default=None,
+        description="显式操作编码 Operation，如 YLBillClose、BillClose、Forbid。"
+                    "整单关闭/反关闭动作随表单而异，二开单据或元数据解析失败时请显式传入。",
+    )
+
+    @model_validator(mode="after")
+    def _check_at_least_one_target(self) -> "ExecuteActionInput":
+        if not self.bill_ids and not self.bill_nos:
+            raise ValueError(
+                "bill_ids 与 bill_nos 至少提供一个：请传单据内码 FID 列表（bill_ids）"
+                "或单据编号列表（bill_nos）"
+            )
+        if self.bill_ids is not None and len(self.bill_ids) == 0:
+            raise ValueError("bill_ids 不能为空列表")
+        if self.bill_nos is not None and len(self.bill_nos) == 0:
+            raise ValueError("bill_nos 不能为空列表")
+        return self
+
+
+async def _resolve_execute_operation(form_id: str, operation_hint: Optional[str],
+                                     match_names: List[str],
+                                     exclude_names: Optional[List[str]] = None):
+    """解析 ExecuteOperation 的 opNumber 操作编码。
+
+    优先级：显式 operation 参数 > 该 form_id 元数据 Operations 中文名匹配。
+
+    Returns:
+        (op_number, source, matched_name, available_ops):
+          - op_number: 解析出的操作编码（如 YLBillClose / BillClose / Forbid）；None 表示无法确定
+          - source: "explicit"（用户显式传 operation）| "metadata"（元数据中文名匹配）| None
+          - matched_name: 命中的操作中文名（source="metadata" 时有值）
+          - available_ops: 该表单全部操作 [{number, name}]（用于错误提示）
+    """
+    if operation_hint:
+        return operation_hint, "explicit", "", []
+
+    available: List[dict] = []
+    metadata = await _query_metadata(form_id)
+    if metadata:
+        try:
+            ops = metadata.get("Result", {}).get("NeedReturnData", {}).get("Operations") or []
+        except Exception:
+            ops = []
+        for op in ops:
+            num = op.get("OperationNumber") or ""
+            if not num:
+                continue
+            zh = ""
+            for n in op.get("OperationName") or []:
+                if isinstance(n, dict) and n.get("Key") == 2052 and n.get("Value"):
+                    zh = n["Value"]
+                    break
+            if not zh:
+                for n in op.get("OperationName") or []:
+                    if isinstance(n, dict) and n.get("Value"):
+                        zh = n["Value"]
+                        break
+            available.append({"number": num, "name": zh})
+
+    excludes = set(exclude_names or [])
+    # 1) 精确中文名匹配（无歧义，最优先）
+    for kw in match_names:
+        for a in available:
+            if a["name"] == kw:
+                return a["number"], "metadata", a["name"], available
+    # 2) 包含匹配（排除 反/业务/行/应付/终止/冻结 等干扰词，避免误匹配 反关闭/业务关闭/行关闭）
+    for a in available:
+        name = a["name"]
+        if not name:
+            continue
+        if any(x in name for x in excludes):
+            continue
+        if any(kw in name for kw in match_names):
+            return a["number"], "metadata", name, available
+    return None, None, "", available
+
+
+def _operation_resolve_error(form_id: str, action_desc: str, available: List[dict]) -> str:
+    """构造“无法自动解析操作编码”的明确中文错误，提示显式传 operation。"""
+    if available:
+        named = [f"{a['name']}({a['number']})" for a in available if a["name"]]
+        ops_desc = "、".join(named) if named else "、".join(a["number"] for a in available)
+        avail_tip = f"该表单元数据可用的操作：{ops_desc}"
+    else:
+        avail_tip = "未能读取该表单元数据（可先调用 kingdee_refresh_metadata 刷新缓存后重试）"
+    return (
+        f"无法自动确定 {form_id} 的『{action_desc}』操作编码（Operation）。"
+        f"该动作编码随表单而异（如整单关闭：SAL_SaleOrder=YLBillClose、"
+        f"PUR_Requisition=BillClose），无法静态推断。请在调用时显式传 operation 参数"
+        f"（二开单据尤其需要），或先在表单元数据 Operations 中确认编码。{avail_tip}"
+    )
+
+
+async def _run_execute_action(params: ExecuteActionInput, action: str,
+                              op_label: str, source: str = "fixed",
+                              matched_name: str = "",
+                              endpoint: str = "execute") -> str:
+    """ExecuteOperation / CancelAssign 标准动作的共用实现。
+
+    - endpoint="execute"（默认）：走 ExecuteOperation，action 作为**顶层 opNumber** 传入
+      （QA 严过关 2026-08-07 真机实测格式：opNumber 与 formid 平级，data 只放业务参数）；
+    - endpoint="cancel_assign"：走独立 CancelAssign 端点（撤销），无需 opNumber。
+    构造业务参数 data（Ids 逗号拼接或 Numbers 列表）→ _post_raw → 结构化返回。
+    """
+    try:
+        business: dict[str, Any] = {}
+        if params.bill_ids:
+            business["Ids"] = ",".join(params.bill_ids)
+        else:
+            business["Numbers"] = params.bill_nos
+
+        if endpoint == "cancel_assign":
+            result = await _post_raw("cancel_assign", params.form_id, business)
+        else:
+            result = await _post_raw("execute", params.form_id, business, op_number=action)
+
+        status_data = _result_status(result, op_label)
+        status_data["form_id"] = params.form_id
+        status_data["action"] = action
+        status_data["action_source"] = source
+        status_data["endpoint"] = endpoint
+        if matched_name:
+            status_data["matched_operation_name"] = matched_name
+        # 💡 REMEMBER: _result_status 返回的是 fid/ids（不是 id），此处保持口径一致
+        if status_data.get("success"):
+            status_data["tip"] = (
+                f"已在 {params.form_id} 上执行操作『{action}』（端点 {endpoint}）。"
+                "注意：返回标识为 fid/ids（非 id），读取时请用 fid 或 ids 字段。"
+            )
+        return _fmt(status_data)
+    except Exception as e:
+        return _err(e, op=op_label)
+
+
+@mcp.tool(
+    name="kingdee_cancel_bills",
+    annotations={"title": "撤销单据/基础资料", "readOnlyHint": False, "destructiveHint": False,
+                 "idempotentHint": False, "openWorldHint": False}
+)
+async def kingdee_cancel_bills(params: ExecuteActionInput) -> str:
+    """撤销单据或基础资料（草稿/审批中状态回退，action=CancelAssign）。
+
+    - FormId 参数化通用工具（非某单专用，理由：撤销是标准动作应走通用工具防重复），
+      适用于单据 + 基础资料（如 SAL_SaleOrder / PUR_Requisition / BD_Customer / BD_Material 等）。
+    - action 依据：范探源 2026-08-07 三重证据查证（元数据 OperationNumber +
+      OperationNumberConst.cs 反编译 + 官方论坛/第三方实测），撤销 = CancelAssign
+      （旧文档误作 Cancel，勿引用）。
+    - 端点：默认走**独立 CancelAssign 端点**（无需 opNumber，QA 严过关 2026-08-07 真机验证
+      B→D 成功），data={"Ids":"1,2,3"} 或 {"Numbers":[...]}，比走 ExecuteOperation 更简单直接。
+    - 传参：bill_ids（FID 列表，优先）或 bill_nos（单据编号列表），至少一个。
+    - 二开单据自定义撤销动作时，可显式传 operation 覆盖默认 CancelAssign（此时走
+      ExecuteOperation + 顶层 opNumber）。
+
+    Returns:
+        str: JSON，含 success / fid / ids / action / endpoint 字段（注意是 fid/ids 而非 id）
+    """
+    if params.operation:
+        # 二开自定义撤销动作 → 走 ExecuteOperation + 顶层 opNumber
+        return await _run_execute_action(params, params.operation, "cancel_assign", "explicit")
+    # 标准撤销 → 走独立 CancelAssign 端点（无需 opNumber，真机验证 B→D 成功）
+    return await _run_execute_action(params, "CancelAssign", "cancel_assign", "fixed",
+                                     endpoint="cancel_assign")
+
+
+@mcp.tool(
+    name="kingdee_void_bills",
+    annotations={"title": "作废单据", "readOnlyHint": False, "destructiveHint": True,
+                 "idempotentHint": False, "openWorldHint": False}
+)
+async def kingdee_void_bills(params: ExecuteActionInput) -> str:
+    """作废单据（opNumber=Cancel，非 Invalid！全库无 Invalid 常量）。
+
+    - FormId 参数化通用工具（非某单专用，理由：作废是标准动作应走通用工具防重复），
+      仅适用于单据（如 SAL_SaleOrder / PUR_PurchaseOrder / STK_InStock 等）。
+    - action 依据：范探源 2026-08-07 三重证据查证——作废 = Cancel，
+      旧文档误作 Invalid（OperationNumberConst.cs 反编译确认全库无 Invalid 常量），勿引用。
+    - 端点/格式：ExecuteOperation，opNumber=Cancel 放**顶层**（与 formid 平级），
+      data 只放业务参数 {"Ids":"..."} 或 {"Numbers":[...]}（QA 严过关真机实测格式）。
+    - 传参：bill_ids（FID 列表，优先）或 bill_nos（单据编号列表），至少一个。
+    - 二开单据自定义作废动作时，可显式传 operation 覆盖默认 Cancel。
+
+    Returns:
+        str: JSON，含 success / fid / ids / action / endpoint 字段（注意是 fid/ids 而非 id）
+    """
+    action = params.operation or "Cancel"
+    source = "explicit" if params.operation else "fixed"
+    return await _run_execute_action(params, action, "void", source)
+
+
+@mcp.tool(
+    name="kingdee_close_bill",
+    annotations={"title": "整单关闭单据", "readOnlyHint": False, "destructiveHint": False,
+                 "idempotentHint": False, "openWorldHint": False}
+)
+async def kingdee_close_bill(params: ExecuteActionInput) -> str:
+    """整单关闭单据（已审核单据业务关闭，opNumber 随表单而异）。
+
+    - FormId 参数化通用工具（非某单专用，理由：整单关闭是标准动作应走通用工具防重复），
+      适用于单据（销售订单、采购申请单、发货通知单等）。
+    - action 依据：范探源 2026-08-07 三重证据查证 + QA 严过关真机实测——整单关闭
+      opNumber 因表单而异（如 SAL_SaleOrder=YLBillClose、PUR_Requisition=BillClose、
+      PUR_PurchaseOrder=BillClose、SAL_DELIVERYNOTICE=BillClose），无法静态固定，需真机确认。
+    - 端点/格式：ExecuteOperation，opNumber 放顶层，data 只放业务参数。
+    - 解析优先级：显式 operation 参数 > 该 form_id 元数据 Operations 按中文名
+      「整单关闭/关闭单据」匹配 OperationNumber（复用元数据缓存 _query_metadata）；
+      匹配不到返回明确中文错误（提示显式传 operation）。
+    - 传参：bill_ids（FID 列表，优先）或 bill_nos（单据编号列表），至少一个。
+
+    Returns:
+        str: JSON，含 success / fid / ids / action / action_source / endpoint 字段
+    """
+    if params.operation:
+        action, source, matched = params.operation, "explicit", ""
+    else:
+        action, source, matched, available = await _resolve_execute_operation(
+            params.form_id, None,
+            match_names=["整单关闭", "关闭单据"],
+            exclude_names=["反", "业务", "行", "应付", "终止", "冻结"],
+        )
+        if not action:
+            return _fmt({
+                "error": True, "op": "close", "success": False,
+                "form_id": params.form_id,
+                "message": _operation_resolve_error(params.form_id, "整单关闭", available),
+            })
+    return await _run_execute_action(params, action, "close", source, matched)
+
+
+@mcp.tool(
+    name="kingdee_unclose_bill",
+    annotations={"title": "整单反关闭单据", "readOnlyHint": False, "destructiveHint": False,
+                 "idempotentHint": False, "openWorldHint": False}
+)
+async def kingdee_unclose_bill(params: ExecuteActionInput) -> str:
+    """整单反关闭单据（已整单关闭的单据恢复业务，opNumber 随表单而异）。
+
+    - FormId 参数化通用工具（非某单专用，理由：反关闭是标准动作应走通用工具防重复），
+      适用于单据（销售订单、采购申请单、发货通知单等）。
+    - action 依据：范探源 2026-08-07 三重证据查证 + QA 严过关真机实测——反关闭
+      opNumber 因表单而异（如 SAL_SaleOrder=YLUnBillClose、PUR_Requisition=Unclose、
+      PUR_PurchaseOrder=BillUnClose、SAL_DELIVERYNOTICE=UncloseBill），无法静态固定，需真机确认。
+    - 端点/格式：ExecuteOperation，opNumber 放顶层，data 只放业务参数。
+    - 解析优先级：显式 operation 参数 > 该 form_id 元数据 Operations 按中文名
+      「整单反关闭/反关闭」匹配 OperationNumber（复用元数据缓存 _query_metadata）；
+      匹配不到返回明确中文错误（提示显式传 operation）。
+    - 传参：bill_ids（FID 列表，优先）或 bill_nos（单据编号列表），至少一个。
+
+    Returns:
+        str: JSON，含 success / fid / ids / action / action_source / endpoint 字段
+    """
+    if params.operation:
+        action, source, matched = params.operation, "explicit", ""
+    else:
+        action, source, matched, available = await _resolve_execute_operation(
+            params.form_id, None,
+            match_names=["整单反关闭", "反关闭"],
+            exclude_names=["业务", "行", "应付"],
+        )
+        if not action:
+            return _fmt({
+                "error": True, "op": "unclose", "success": False,
+                "form_id": params.form_id,
+                "message": _operation_resolve_error(params.form_id, "整单反关闭", available),
+            })
+    return await _run_execute_action(params, action, "unclose", source, matched)
+
+
+@mcp.tool(
+    name="kingdee_forbid_bills",
+    annotations={"title": "禁用基础资料", "readOnlyHint": False, "destructiveHint": False,
+                 "idempotentHint": False, "openWorldHint": False}
+)
+async def kingdee_forbid_bills(params: ExecuteActionInput) -> str:
+    """禁用基础资料（opNumber=Forbid，非 UnForbid；Disable 已废弃慎用）。
+
+    - FormId 参数化通用工具（非某单专用，理由：禁用是标准动作应走通用工具防重复），
+      仅适用于基础资料（如 BD_Customer / BD_Supplier / BD_Material / BD_Stock 等）。
+    - action 依据：范探源 2026-08-07 三重证据查证 + QA 严过关真机实测——禁用 = Forbid，
+      Disable 已废弃慎用，勿用 UnForbid（无此常量）。
+    - 端点/格式：ExecuteOperation，opNumber=Forbid 放**顶层**，data 只放业务参数。
+    - 传参：bill_ids（FID 列表，优先）或 bill_nos（编号列表，基础资料用 FNumber），至少一个。
+    - 二开基础资料自定义禁用动作时，可显式传 operation 覆盖默认 Forbid。
+
+    Returns:
+        str: JSON，含 success / fid / ids / action / endpoint 字段（注意是 fid/ids 而非 id）
+    """
+    action = params.operation or "Forbid"
+    source = "explicit" if params.operation else "fixed"
+    return await _run_execute_action(params, action, "forbid", source)
+
+
+@mcp.tool(
+    name="kingdee_enable_bills",
+    annotations={"title": "反禁用基础资料", "readOnlyHint": False, "destructiveHint": False,
+                 "idempotentHint": False, "openWorldHint": False}
+)
+async def kingdee_enable_bills(params: ExecuteActionInput) -> str:
+    """反禁用基础资料（opNumber=Enable）。
+
+    - FormId 参数化通用工具（非某单专用，理由：反禁用是标准动作应走通用工具防重复），
+      仅适用于基础资料（如 BD_Customer / BD_Supplier / BD_Material / BD_Stock 等）。
+    - action 依据：范探源 2026-08-07 三重证据查证 + QA 严过关真机实测——反禁用 = Enable。
+    - 端点/格式：ExecuteOperation，opNumber=Enable 放**顶层**，data 只放业务参数。
+    - 传参：bill_ids（FID 列表，优先）或 bill_nos（编号列表，基础资料用 FNumber），至少一个。
+    - 二开基础资料自定义反禁用动作时，可显式传 operation 覆盖默认 Enable。
+
+    Returns:
+        str: JSON，含 success / fid / ids / action / endpoint 字段（注意是 fid/ids 而非 id）
+    """
+    action = params.operation or "Enable"
+    source = "explicit" if params.operation else "fixed"
+    return await _run_execute_action(params, action, "enable", source)
 
 
 class PushDownInput(BaseModel):
@@ -4546,6 +4917,215 @@ async def kingdee_query_expense_reimburse(params: QueryInput) -> str:
         return _fmt({
             "form_id": form_id,
             "form_name": "费用报销单",
+            "start_row": params.start_row,
+            "count": len(rows),
+            "has_more": len(rows) >= params.limit,
+            "data": rows
+        })
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool(
+    name="kingdee_query_loan_balance",
+    annotations={"title": "查询借款余额", "readOnlyHint": True, "destructiveHint": False,
+                 "idempotentHint": True, "openWorldHint": False}
+)
+async def kingdee_query_loan_balance(params: QueryInput) -> str:
+    """查询历史借款余额（人人报销域）。
+
+    对应金蝶 ApiDoc「人人报销 → 历史借款余额」模块，FormId: ER_HistoricalLoanBalance。
+    用于查询员工/部门的借款余额快照，支持按状态、申请人、日期筛选。
+
+    ⚠️ 环境注意：该单据在部分账套（如芯之蝶测试账套 <ACCT_ID>）未启用，
+    kingdee_get_fields 会返回「未知表单」。本工具代码已就绪，待目标账套启用该模块后即可连真机使用；
+    字段 Key 以金蝶标准元数据为准，若实测报「字段不存在」请先用 kingdee_get_fields 复核。
+
+    推荐 field_keys：
+    FID,FBillNo,FDate,FDocumentStatus,FApplicantId.FName,FEmployeeId.FName,FLoanAmount,FRepaidAmount,FUnRepayAmount
+    """
+    try:
+        form_id = "ER_HistoricalLoanBalance"
+        field_keys = params.field_keys or "FID,FBillNo,FDate,FDocumentStatus,FApplicantId.FName,FEmployeeId.FName,FLoanAmount,FRepaidAmount,FUnRepayAmount"
+
+        payload = [form_id, {
+            "FormId": form_id,
+            "FieldKeys": field_keys,
+            "FilterString": params.filter_string or "",
+            "OrderString": params.order_string or "FDate DESC",
+            "TopRowCount": params.limit,
+            "StartRow": params.start_row
+        }]
+
+        result = await _post("query", payload)
+        rows = _rows(result)
+
+        return _fmt({
+            "form_id": form_id,
+            "form_name": "历史借款余额",
+            "start_row": params.start_row,
+            "count": len(rows),
+            "has_more": len(rows) >= params.limit,
+            "data": rows,
+            "env_note": "目标账套若未启用 ER_HistoricalLoanBalance，查询会返回空或报错，需启用模块后使用"
+        })
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool(
+    name="kingdee_query_sales_outstock",
+    annotations={"title": "查询销售出库单", "readOnlyHint": True, "destructiveHint": False,
+                 "idempotentHint": True, "openWorldHint": False}
+)
+async def kingdee_query_sales_outstock(params: QueryInput) -> str:
+    """查询销售出库单（发货单）。
+
+    对应金蝶 ApiDoc 销售管理域「销售出库」模块，FormId: SAL_OUTSTOCK。
+    用于查询已发货/出库的明细，支持按客户、仓库组织、日期、单据状态筛选。
+
+    ⚠️ 字段 Key 警示（真机实测，2026-08-07）：
+    本环境客户字段的元数据 Key 是 **FCustomerID**（大写 ID 后缀），并非 SAL_SaleOrder
+    常见的 FCustId，也不是 kingdee_list_forms 推荐的 FCustId。直接传 FCustId 会报
+    「元数据中标识为FCustId的字段不存在」。字段 Key 一律以 kingdee_get_fields 元数据为准。
+
+    常用 filter_string：
+    - 已审核: "FDocumentStatus='C'"
+    - 指定客户: "FCustomerID.FNumber='C001'"
+    - 日期区间: "FDate>='2026-05-01' and FDate<='2026-05-31'"
+
+    推荐 field_keys（已按本环境元数据校验可用）：
+    FID,FBillNo,FDate,FDocumentStatus,FCustomerID.FName,FStockOrgId.FName
+    """
+    try:
+        form_id = "SAL_OUTSTOCK"
+        field_keys = params.field_keys or "FID,FBillNo,FDate,FDocumentStatus,FCustomerID.FName,FStockOrgId.FName"
+
+        payload = [form_id, {
+            "FormId": form_id,
+            "FieldKeys": field_keys,
+            "FilterString": params.filter_string or "",
+            "OrderString": params.order_string or "FDate DESC",
+            "TopRowCount": params.limit,
+            "StartRow": params.start_row
+        }]
+
+        result = await _post("query", payload)
+        rows = _rows(result)
+
+        return _fmt({
+            "form_id": form_id,
+            "form_name": "销售出库单",
+            "start_row": params.start_row,
+            "count": len(rows),
+            "has_more": len(rows) >= params.limit,
+            "data": rows
+        })
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool(
+    name="kingdee_query_delivery_notice",
+    annotations={"title": "查询发货通知单", "readOnlyHint": True, "destructiveHint": False,
+                 "idempotentHint": True, "openWorldHint": False}
+)
+async def kingdee_query_delivery_notice(params: QueryInput) -> str:
+    """查询发货通知单。
+
+    对应金蝶 ApiDoc 销售管理域「发货通知」模块，FormId: SAL_DELIVERYNOTICE。
+    用于查询待发货/已发货通知单及其客户信息，支持按客户、日期、单据状态筛选。
+
+    ⚠️ 字段 Key 警示（真机实测，范探源已验证）：
+    本账套客户字段的元数据 Key 是 **FCustomerID**（大写 ID 后缀）。误用 FCustId 会报
+    「元数据中标识为FCustId的字段不存在」——本环境的 FCustId 在元数据中不存在，切勿改回 FCustId。
+    字段 Key 一律以 kingdee_get_fields 元数据为准。
+
+    ⚠️ 动作范围说明：标准保存/提交/审核动作已由通用 kingdee_save_bill / kingdee_submit_bills /
+    kingdee_audit_bills 等按 FormId 参数化覆盖，本工具仅做查询，不负责写操作。
+
+    常用 filter_string：
+    - 已审核: "FDocumentStatus='C'"
+    - 指定客户: "FCustomerID.FNumber='C001'"
+    - 日期区间: "FDate>='2026-05-01' and FDate<='2026-05-31'"
+
+    推荐 field_keys（已按本环境元数据校验可用）：
+    FID,FBillNo,FDate,FDocumentStatus,FCustomerID.FName
+    """
+    try:
+        form_id = "SAL_DELIVERYNOTICE"
+        field_keys = params.field_keys or "FID,FBillNo,FDate,FDocumentStatus,FCustomerID.FName"
+
+        payload = [form_id, {
+            "FormId": form_id,
+            "FieldKeys": field_keys,
+            "FilterString": params.filter_string or "",
+            "OrderString": params.order_string or "FDate DESC",
+            "TopRowCount": params.limit,
+            "StartRow": params.start_row
+        }]
+
+        result = await _post("query", payload)
+        rows = _rows(result)
+
+        return _fmt({
+            "form_id": form_id,
+            "form_name": "发货通知单",
+            "start_row": params.start_row,
+            "count": len(rows),
+            "has_more": len(rows) >= params.limit,
+            "data": rows
+        })
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool(
+    name="kingdee_query_stock_in",
+    annotations={"title": "查询采购入库单", "readOnlyHint": True, "destructiveHint": False,
+                 "idempotentHint": True, "openWorldHint": False}
+)
+async def kingdee_query_stock_in(params: QueryInput) -> str:
+    """查询采购入库单。
+
+    对应金蝶 ApiDoc 库存管理域「采购入库」模块，FormId: STK_InStock。
+    用于查询已完成/在途的采购入库单及其供应商信息，支持按供应商、仓库、日期、单据状态筛选。
+
+    ⚠️ 字段 Key 警示（真机实测，范探源已验证）：
+    本单据业务伙伴是**供应商**，字段 Key 用 **FSupplierId**（注意与销售类单据的 FCustId /
+    FCustomerID 不同，采购入库单的客户字段并不存在）。误用 FCustId 会报「字段不存在」。
+    字段 Key 一律以 kingdee_get_fields 元数据为准。
+
+    ⚠️ 动作范围说明：标准保存/提交/审核动作已由通用 kingdee_save_bill / kingdee_submit_bills /
+    kingdee_audit_bills 等按 FormId 参数化覆盖，本工具仅做查询，不负责写操作。
+
+    常用 filter_string：
+    - 已审核: "FDocumentStatus='C'"
+    - 指定供应商: "FSupplierId.FNumber='V001'"
+    - 日期区间: "FDate>='2026-05-01' and FDate<='2026-05-31'"
+
+    推荐 field_keys（已按本环境元数据校验可用）：
+    FID,FBillNo,FDate,FDocumentStatus,FSupplierId.FName
+    """
+    try:
+        form_id = "STK_InStock"
+        field_keys = params.field_keys or "FID,FBillNo,FDate,FDocumentStatus,FSupplierId.FName"
+
+        payload = [form_id, {
+            "FormId": form_id,
+            "FieldKeys": field_keys,
+            "FilterString": params.filter_string or "",
+            "OrderString": params.order_string or "FDate DESC",
+            "TopRowCount": params.limit,
+            "StartRow": params.start_row
+        }]
+
+        result = await _post("query", payload)
+        rows = _rows(result)
+
+        return _fmt({
+            "form_id": form_id,
+            "form_name": "采购入库单",
             "start_row": params.start_row,
             "count": len(rows),
             "has_more": len(rows) >= params.limit,
@@ -6710,11 +7290,63 @@ def _run_check() -> int:
 
 
 def main():
-    """MCP Server 入口点"""
+    """MCP Server 入口点
+
+    用法:
+      kingdee-mcp                              # 默认 stdio 模式（本地 MCP 客户端）
+      kingdee-mcp --transport sse              # SSE 远程模式，监听 http://host:port/sse
+      kingdee-mcp --transport streamable-http  # Streamable HTTP 远程模式，监听 http://host:port/mcp
+    远程模式可用 --host / --port 指定监听地址（默认 127.0.0.1:8000）。
+    也支持环境变量 KINGDEE_MCP_TRANSPORT / KINGDEE_MCP_HOST / KINGDEE_MCP_PORT。
+    """
     import sys
+    import argparse
+
     if len(sys.argv) > 1 and sys.argv[1] in ("--check", "check"):
         sys.exit(_run_check())
-    mcp.run()
+
+    parser = argparse.ArgumentParser(
+        prog="kingdee-mcp",
+        description="金蝶云星空 MCP Server (Kingdee Cloud K/3)",
+    )
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "sse", "streamable-http"],
+        default=os.environ.get("KINGDEE_MCP_TRANSPORT", "stdio"),
+        help="传输方式: stdio(默认, 本地) / sse / streamable-http(远程部署用)",
+    )
+    parser.add_argument(
+        "--host",
+        default=os.environ.get("KINGDEE_MCP_HOST", "127.0.0.1"),
+        help="sse / streamable-http 监听地址 (默认 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.environ.get("KINGDEE_MCP_PORT", "8000")),
+        help="sse / streamable-http 监听端口 (默认 8000)",
+    )
+    args = parser.parse_args()
+
+    # run() 不接收 host/port，需设置到 FastMCP 实例的 settings 上
+    try:
+        mcp.settings.host = args.host
+        mcp.settings.port = args.port
+    except Exception as e:  # pragma: no cover
+        print(f"[WARN] 设置监听地址/端口失败: {e}")
+
+    _run_server(transport=args.transport)
+
+
+def _run_server(transport: str) -> None:
+    """启动 MCP Server，兼容不同 mcp 版本支持的 transport 取值。"""
+    try:
+        mcp.run(transport=transport)
+    except ValueError:
+        # 老版本 mcp（<1.9）不支持 streamable-http，回退到 sse / stdio
+        fallback = "sse" if transport != "sse" else "stdio"
+        print(f"[WARN] 当前 mcp 版本不支持 transport={transport!r}，回退到 {fallback!r}")
+        mcp.run(transport=fallback)
 
 
 if __name__ == "__main__":

@@ -41,4 +41,9 @@ memory/
 
 # Temp scratch
 temp_*.md
+temp_*.json
+temp_crud/
 *.full_backup
+
+# WorkBuddy project memory (internal, not for open source)
+.workbuddy/

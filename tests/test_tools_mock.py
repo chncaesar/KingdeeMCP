@@ -231,8 +231,9 @@ class TestAuditBills:
         parsed = json.loads(result)
         assert parsed["op"] == "audit"
         assert parsed["success"] is True
-        assert parsed["bill_ids"] == ["1", "2"]
-        assert parsed["next_action"] is None  # audit 后流程完成
+        assert parsed["succeeded_ids"] == ["1", "2"]
+        assert "next_action" not in parsed  # audit 后流程完成，不再返回 next_action 键
+        assert parsed["tip"] is not None  # 审核成功给出 tip
 
 
 # ─── kingdee_submit_bills ───────────────────────────────
@@ -254,7 +255,7 @@ class TestSubmitBills:
         parsed = json.loads(result)
         assert parsed["op"] == "submit"
         assert parsed["success"] is True
-        assert parsed["bill_ids"] == ["3"]
+        assert parsed["succeeded_ids"] == ["3"]
         assert parsed["next_action"] == "audit"
 
 
@@ -277,8 +278,8 @@ class TestUnauditBills:
         parsed = json.loads(result)
         assert parsed["op"] == "unaudit"
         assert parsed["success"] is True
-        assert parsed["bill_ids"] == ["1"]
-        assert parsed["next_action"] is None  # 反审核后流程完成
+        assert parsed["succeeded_ids"] == ["1"]
+        assert "next_action" not in parsed  # 反审核后流程完成，不再返回 next_action 键
 
 
 # ─── kingdee_delete_bills ───────────────────────────────
@@ -300,7 +301,7 @@ class TestDeleteBills:
         parsed = json.loads(result)
         assert parsed["op"] == "delete"
         assert parsed["success"] is True
-        assert parsed["bill_ids"] == ["5"]
+        assert parsed["succeeded_ids"] == ["5"]
 
 
 # ─── kingdee_push_bill ─────────────────────────────────

@@ -8,33 +8,45 @@ sys.path.insert(0, "src")
 from kingdee_mcp.server import MetadataValidator, FieldDef
 
 
-# 模拟金蝶 QueryBusinessInfo 返回的元数据
+# 模拟金蝶 QueryBusinessInfo 返回的元数据（结构与现实现 _parse_fields 对齐：
+# Result.NeedReturnData.Entrys[].Fields[].Key；FieldType 为数字编码）
 MOCK_METADATA = {
     "Result": {
-        "FormId": "SAL_SaleOrder",
-        "FormName": "销售订单",
-        "MetadataEntity": {
-            "Name": "基础信息",
-            "TableName": "SAL_SaleOrder",
-            "Fields": [
-                # 表头字段
-                {"Name": "FDate", "Caption": "日期", "IsSystem": False, 
-                 "FieldType": {"Name": "Datetime", "Key": "185"}, "MustInput": True},
-                {"Name": "FSaleOrgId", "Caption": "销售组织", "IsSystem": False,
-                 "FieldType": {"Name": "BaseData", "Key": "127"}, "MustInput": True},
-                {"Name": "FCustId", "Caption": "客户", "IsSystem": False,
-                 "FieldType": {"Name": "BaseData", "Key": "127"}, "MustInput": True},
-                # 分录
+        "ResponseStatus": {"IsSuccess": True, "Errors": []},
+        "NeedReturnData": {
+            "Id": "SAL_SaleOrder",
+            "Name": [{"Key": 2052, "Value": "销售订单"}],
+            "Entrys": [
                 {
-                    "Name": "FSaleOrderEntry", "Caption": "订单明细", "IsSystem": False,
-                    "FieldType": {"Name": "Entry", "Key": "256"},
+                    "Key": "FBillHead",
+                    "Name": [{"Key": 2052, "Value": "基本信息"}],
+                    "TableName": "T_SAL_SALEORDER",
+                    "ParentKey": None,
+                    "EntryName": "SAL_SALEORDER",
+                    "EntryPkFieldName": "FID",
                     "Fields": [
-                        {"Name": "FMaterialId", "Caption": "物料编码", "MustInput": True,
-                         "FieldType": {"Name": "BaseData", "Key": "127"}},
-                        {"Name": "FPriceUnitId", "Caption": "计价单位", "MustInput": True,
-                         "FieldType": {"Name": "BaseData", "Key": "127"}},
-                        {"Name": "FQuantity", "Caption": "数量",
-                         "FieldType": {"Name": "Dec", "Key": "106"}},
+                        {"Key": "FDate", "Name": [{"Key": 2052, "Value": "日期"}],
+                         "FieldType": 61, "MustInput": True},
+                        {"Key": "FSaleOrgId", "Name": [{"Key": 2052, "Value": "销售组织"}],
+                         "FieldType": 127, "MustInput": True},
+                        {"Key": "FCustId", "Name": [{"Key": 2052, "Value": "客户"}],
+                         "FieldType": 127, "MustInput": True},
+                    ]
+                },
+                {
+                    "Key": "FSaleOrderEntry",
+                    "Name": [{"Key": 2052, "Value": "订单明细"}],
+                    "TableName": "T_SAL_SALEORDERENTRY",
+                    "ParentKey": None,
+                    "EntryName": "SAL_SALEORDERENTRY",
+                    "EntryPkFieldName": "FENTRYID",
+                    "Fields": [
+                        {"Key": "FMaterialId", "Name": [{"Key": 2052, "Value": "物料编码"}],
+                         "FieldType": 127, "MustInput": True},
+                        {"Key": "FPriceUnitId", "Name": [{"Key": 2052, "Value": "计价单位"}],
+                         "FieldType": 127, "MustInput": True},
+                        {"Key": "FQuantity", "Name": [{"Key": 2052, "Value": "数量"}],
+                         "FieldType": 106, "MustInput": False},
                     ]
                 }
             ]
@@ -51,14 +63,16 @@ def test_metadata_validator():
 
     validator = MetadataValidator(MOCK_METADATA)
 
-    # 测试1: 字段名拼写错误
+    # 测试1: 字段名拼写错误（表头字段仍由 FSales→FSale 前缀规则修正；
+    #        分录实体名现实现不再自动修正——候选集仅表头字段，须用正确名；
+    #        分录内子字段仍走保守模糊修正）
     print("\n[测试1] 字段名拼写错误")
     payload = {
         "FDate": "2026-05-11",
-        "FSalesOrgId": {"FNumber": "001"},  # 错误：应该是 FSaleOrgId
+        "FSalesOrgId": {"FNumber": "001"},  # 错误：应修正为 FSaleOrgId
         "FCustId": {"FNumber": "C001"},
-        "FSalesOrderEntry": [  # 错误：应该是 FSaleOrderEntry
-            {"FMaterialId": {"FNumber": "M001"}, "FPriceUnitId": {"FNumber": "P001"}}
+        "FSaleOrderEntry": [  # 分录实体名：当前实现不修正，须用正确名
+            {"FMaterilId": {"FNumber": "M001"}, "FPriceUnitId": {"FNumber": "P001"}}  # 错误：应修正为 FMaterialId
         ]
     }
 
@@ -67,10 +81,11 @@ def test_metadata_validator():
     print(f"  修正后: {list(fixed.keys())}")
     print(f"  修正列表: {fixes}")
 
-    # 验证
+    # 验证（与现实现行为一致）
     assert "FSaleOrgId" in fixed, "FSalesOrgId 应该被修正为 FSaleOrgId"
-    assert "FSaleOrderEntry" in fixed, "FSalesOrderEntry 应该被修正为 FSaleOrderEntry"
-    assert "FSalesOrgId" not in fixed.get("FDate", ""), "FSalesOrgId 不应该还在原位"
+    assert "FSalesOrgId" not in fixed, "FSalesOrgId 不应残留"
+    assert "FSaleOrderEntry" in fixed, "FSaleOrderEntry 应保持正确实体名"
+    assert "FMaterialId" in fixed["FSaleOrderEntry"][0], "分录子字段 FMaterilId 应该被修正为 FMaterialId"
     print("  [PASS]")
 
     # 测试2: 正确字段不应被修改

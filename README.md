@@ -1,5 +1,7 @@
 # Kingdee MCP Server —— 让 AI 直接操作金蝶云星空 ERP
 
+> ⚠️ 本项目为**第三方开源**，非金蝶官方出品，与金蝶软件（Kingdee）无任何隶属或授权关系。
+
 [![PyPI version](https://img.shields.io/pypi/v/kingdee-mcp?style=flat-square&color=2563eb)](https://pypi.org/project/kingdee-mcp/)
 [![Downloads](https://img.shields.io/pypi/dm/kingdee-mcp?style=flat-square&color=10b981)](https://pypi.org/project/kingdee-mcp/)
 [![Python versions](https://img.shields.io/pypi/pyversions/kingdee-mcp?style=flat-square)](https://pypi.org/project/kingdee-mcp/)
@@ -75,6 +77,25 @@ pip install kingdee-mcp
 ```bash
 uvx kingdee-mcp
 ```
+
+## 远程部署（HTTP / SSE 模式）
+
+默认以 `stdio` 模式运行（本地 MCP 客户端通过子进程调用）。若要把服务部署到服务器、或用网关/托管平台（如 Smithery）**远程调用、免客户端安装**，可改用 HTTP 类传输：
+
+```bash
+# SSE 模式（兼容性好，旧客户端首选）
+uvx kingdee-mcp --transport sse --host 0.0.0.0 --port 8000
+
+# Streamable HTTP 模式（MCP 新版推荐）
+uvx kingdee-mcp --transport streamable-http --host 0.0.0.0 --port 8000
+```
+
+- SSE 端点：`http://<host>:<port>/sse`
+- Streamable HTTP 端点：`http://<host>:<port>/mcp`
+
+> 远程模式下**仍需金蝶账号密码**（通过 `KINGDEE_*` 环境变量注入）。HTTP 只是传输通道，并不替代金蝶认证——客户端连上来后，工具调用照样要走金蝶 ValidateUser 登录。
+
+也可用环境变量代替命令行参数：`KINGDEE_MCP_TRANSPORT`（stdio/sse/streamable-http）、`KINGDEE_MCP_HOST`、`KINGDEE_MCP_PORT`。
 
 ## 配置教程
 
