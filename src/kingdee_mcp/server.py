@@ -1005,8 +1005,9 @@ async def _query_metadata(form_id: str, force: bool = False) -> Optional[dict]:
 
         async with httpx.AsyncClient(timeout=30, proxy=None,
                                       transport=httpx.AsyncHTTPTransport(http1=True)) as client:
-            if not _session_id:
-                await _login()
+            async with _get_session_lock():
+                if not _session_id:
+                    await _login()
 
             resp = await _do_post(_session_id, client)
 
@@ -1015,7 +1016,8 @@ async def _query_metadata(form_id: str, force: bool = False) -> Optional[dict]:
                 resp.status_code == 200 and
                 ("会话" in resp.text or "session" in resp.text.lower())
             ):
-                await _login()
+                async with _get_session_lock():
+                    await _login()
                 resp = await _do_post(_session_id, client)
 
             resp.raise_for_status()
@@ -1086,14 +1088,14 @@ FORM_CATALOG = {
         "name": "客户",
         "alias": ["客户", "客户档案", "客户资料"],
         "desc": "企业销售业务中的购买方（下游）。",
-        "fields": "FNumber,FName,FShortName,FContact,FPhone,FDocumentStatus",
+        "fields": "FNumber,FName,FShortName,FTEL,FDocumentStatus",
         "db_tables": ("T_BD_CUSTOMER",),
     },
     "BD_Supplier": {
         "name": "供应商",
         "alias": ["供应商", "供应商档案", "厂家", "供货商"],
         "desc": "企业采购业务中的供应方（上游）。",
-        "fields": "FSupplierId,FNumber,FName,FShortName,FContact,FPhone,FDocumentStatus",
+        "fields": "FNumber,FName,FShortName,FDocumentStatus",
         "db_tables": ("T_BD_SUPPLIER",),
     },
     "BD_Department": {
@@ -1712,8 +1714,9 @@ async def _post(ep_key: str, payload: Any) -> Any:
             async with httpx.AsyncClient(timeout=30, proxy=None,
                                           transport=httpx.AsyncHTTPTransport(http1=True)) as client:
                 # 没有 session 先登录
-                if not _session_id:
-                    await _login()
+                async with _get_session_lock():
+                    if not _session_id:
+                        await _login()
 
                 resp = await _do_post(_session_id)
 
@@ -1722,7 +1725,8 @@ async def _post(ep_key: str, payload: Any) -> Any:
                     resp.status_code == 200 and
                     ("会话" in resp.text or "session" in resp.text.lower())
                 ):
-                    await _login()
+                    async with _get_session_lock():
+                        await _login()
                     resp = await _do_post(_session_id)
 
                 resp.raise_for_status()
@@ -1774,8 +1778,9 @@ async def _post(ep_key: str, payload: Any) -> Any:
         async with httpx.AsyncClient(timeout=30, proxy=None,
                                       transport=httpx.AsyncHTTPTransport(http1=True)) as client:
             # 没有 session 先登录
-            if not _session_id:
-                await _login()
+            async with _get_session_lock():
+                if not _session_id:
+                    await _login()
 
             resp = await _do_post(_session_id)
 
@@ -1784,7 +1789,8 @@ async def _post(ep_key: str, payload: Any) -> Any:
                 resp.status_code == 200 and
                 ("会话" in resp.text or "session" in resp.text.lower())
             ):
-                await _login()
+                async with _get_session_lock():
+                    await _login()
                 resp = await _do_post(_session_id)
 
             resp.raise_for_status()
@@ -1881,8 +1887,9 @@ async def _post_raw(ep_key: str, form_id: str, model: dict,
     try:
         async with httpx.AsyncClient(timeout=30, proxy=None,
                                       transport=httpx.AsyncHTTPTransport(http1=True)) as client:
-            if not _session_id:
-                await _login()
+            async with _get_session_lock():
+                if not _session_id:
+                    await _login()
 
             resp = await client.post(
                 _url(ep_key),
@@ -1897,7 +1904,8 @@ async def _post_raw(ep_key: str, form_id: str, model: dict,
                 resp.status_code == 200 and
                 ("会话" in resp.text or "session" in resp.text.lower())
             ):
-                await _login()
+                async with _get_session_lock():
+                    await _login()
                 resp = await client.post(
                     _url(ep_key),
                     content=body_str.encode("utf-8"),
@@ -2401,8 +2409,8 @@ class PartnerQueryInput(BaseModel):
     partner_type: str = Field(..., description="BD_Customer（客户）或 BD_Supplier（供应商）")
     filter_string: str = Field(default="", description="过滤条件")
     field_keys: str = Field(
-        default="FNumber,FName,FShortName,FContact,FPhone,FDocumentStatus",
-        description="返回字段（如需主键 FID，客户用 FCustId、供应商用 FSupplierId）"
+        default="FNumber,FName,FShortName,FDocumentStatus",
+        description="返回字段（如需主键 FID，客户用 FCustId、供应商用 FSupplierId；联系人/电话在主表不存在，需钻取分录）"
     )
     start_row: int = Field(default=0, ge=0)
     limit: int = Field(default=20, ge=1, le=100)
@@ -2604,7 +2612,7 @@ async def kingdee_query_purchase_order_progress(params: PurchaseOrderProgressInp
         result = await _post("query", _query_payload(
             "PUR_PurchaseOrder", field_keys,
             params.filter_string or "FDocumentStatus='C'",
-            "FBillNo DESC,FPOOrderEntry_LineID ASC",
+            "FBillNo DESC",
             params.start_row, params.limit
         ))
         rows = _rows(result)
@@ -2635,14 +2643,14 @@ async def kingdee_query_sale_orders(params: QueryInput) -> str:
     - 指定客户: "FCustId.FNumber='C001'"
 
     推荐 field_keys：
-    FID,FBillNo,FDate,FDocumentStatus,FCustId.FName,FSalesOrgId.FName,FTotalAmount
+    FID,FBillNo,FDate,FDocumentStatus,FCustId.FName,FSalesOrgId.FName
 
     Returns:
         str: JSON 格式的销售订单列表
     """
     try:
         fk = params.field_keys if params.field_keys != "FID,FBillNo,FDate,FDocumentStatus" \
-            else "FID,FBillNo,FDate,FDocumentStatus,FCustId.FName,FTotalAmount"
+            else "FID,FBillNo,FDate,FDocumentStatus,FCustId.FName"
         result = await _post("query", _query_payload(
             "SAL_SaleOrder", fk, params.filter_string,
             params.order_string, params.start_row, params.limit
@@ -4818,8 +4826,8 @@ async def kingdee_query_workflow_status(params: WorkflowStatusInput) -> str:
         str: JSON 格式的审批状态信息
     """
     try:
-        # 查询单据详情
-        result = await _post("view", [params.form_id, {"Id": params.bill_id}])
+        # 查询单据详情（view 端点走 _post_raw，formid 小写 + data JSON 字符串）
+        result = await _post_raw("view", params.form_id, {"Id": params.bill_id})
 
         if not result:
             return _fmt({"error": "单据不存在"})
@@ -5440,7 +5448,7 @@ class OperationLogInput(BaseModel):
     bill_no: str = Field(default="", description="关联单据号，支持模糊查询")
     form_name: str = Field(default="", description="表单名称，如 采购订单、销售订单 等")
     filter_string: str = Field(default="", description="额外的过滤条件（Kingdee 查询语法）")
-    order_string: str = Field(default="FDATETIME DESC", description="排序条件")
+    order_string: str = Field(default="FDatetime DESC", description="排序条件")
     start_row: int = Field(default=0, ge=0, description="分页起始行")
     limit: int = Field(default=50, ge=1, le=2000, description="每页条数，最大2000")
 
@@ -5540,16 +5548,15 @@ async def kingdee_query_operation_logs(params: OperationLogInput) -> str:
     - 合规要求：追溯敏感操作记录
 
     返回字段说明：
-    - FDATETIME: 操作时间
-    - FUSERID: 操作用户
-    - FCOMPUTERNAME: 机器名称
-    - FCLIENTIP: 客户端IP
-    - FENVIRONMENT: 操作场景（0=登入系统, 1=进入业务对象, 3=业务操作, 4=登出系统）
-    - FOPERATENAME: 操作名称（登录/单据查询/批量保存等）
-    - FDESCRIPTION: 操作描述
+    - FDatetime: 操作时间
+    - FUserId: 操作用户
+    - FComputerName: 机器名称
+    - FClientIP: 客户端IP
+    - FEnvironment: 操作场景（0=登入系统, 1=进入业务对象, 3=业务操作, 4=登出系统）
+    - FOperateName: 操作名称（登录/单据查询/批量保存等）
+    - FDescription: 操作描述
     - FInterId: 对象内码（关联单据号）
     - FTimeConsuming: 耗时(毫秒)
-    - FClientType: 客户端类型
 
     Returns:
         str: JSON 格式的操作日志列表
@@ -5557,17 +5564,17 @@ async def kingdee_query_operation_logs(params: OperationLogInput) -> str:
     try:
         conditions = []
         if params.user_name:
-            conditions.append(f"FUSERID like '%{_escape_sql_like(params.user_name)}%'")
+            conditions.append(f"FUserId.FName like '%{_escape_sql_like(params.user_name)}%'")
         if params.start_date:
-            conditions.append(f"FDATETIME > '{params.start_date} 00:00:00'")
+            conditions.append(f"FDatetime > '{params.start_date} 00:00:00'")
         if params.end_date:
-            conditions.append(f"FDATETIME < '{params.end_date} 23:59:59'")
+            conditions.append(f"FDatetime < '{params.end_date} 23:59:59'")
         if params.operate_type:
-            conditions.append(f"FOPERATENAME like '%{_escape_sql_like(params.operate_type)}%'")
+            conditions.append(f"FOperateName like '%{_escape_sql_like(params.operate_type)}%'")
         if params.bill_no:
             conditions.append(f"FInterId like '%{_escape_sql_like(params.bill_no)}%'")
         if params.form_name:
-            conditions.append(f"FDESCRIPTION like '%{_escape_sql_like(params.form_name)}%'")
+            conditions.append(f"FDescription like '%{_escape_sql_like(params.form_name)}%'")
         if params.filter_string:
             conditions.append(params.filter_string)
 
@@ -5575,7 +5582,7 @@ async def kingdee_query_operation_logs(params: OperationLogInput) -> str:
 
         result = await _post("query", _query_payload(
             "BOS_OperateLog",
-            "FID,FDATETIME,FUSERID,FCOMPUTERNAME,FCLIENTIP,FENVIRONMENT,FOPERATENAME,FDESCRIPTION,FInterId,FTimeConsuming,FClientType",
+            "FID,FDatetime,FUserId,FComputerName,FClientIP,FEnvironment,FOperateName,FDescription,FInterId,FTimeConsuming",
             filter_str,
             params.order_string,
             params.start_row,
@@ -6099,15 +6106,15 @@ async def kingdee_query_transfer_apply(params: QueryInput) -> str:
 
     常用 filter_string：
     - 已审核: "FDocumentStatus='C'"
-    - 指定日期范围: "FBillDate>='2024-01-01' and FBillDate<='2024-12-31'"
-    - 指定调出仓库: "FOutStockId.FNumber='WH01'"
-    - 指定调入仓库: "FInStockId.FNumber='WH02'"
+    - 指定日期范围: "FDate>='2024-01-01' and FDate<='2024-12-31'"
+    - 指定调出仓库: "FStockId.FNumber='WH01'"
+    - 指定调入仓库: "FStockInId.FNumber='WH02'"
     - 未关闭: "FCloseStatus='A' and FBusinessClose='A'"
 
     推荐 field_keys（默认已包含关键字段）：
-    FID,FBillNo,FBillDate,FDocumentStatus,FStockOrgId.FName,
-    FOutStockId.FName,FInStockId.FName,FTransferType,
-    FMaterialId.FNumber,FMaterialId.FName,FUnitId.FName,FQty,FPrice,FAmount
+    FID,FBillNo,FDate,FDocumentStatus,FAPPORGID.FName,
+    FMATERIALID.FNumber,FMATERIALID.FName,FStockId.FName,
+    FStockInId.FName,FUNITID.FName,FQty
 
     Returns:
         str: JSON 格式的调拨申请单列表
@@ -6115,9 +6122,10 @@ async def kingdee_query_transfer_apply(params: QueryInput) -> str:
     try:
         fk = params.field_keys if params.field_keys != "FID,FBillNo,FDate,FDocumentStatus" \
             else (
-                "FID,FBillNo,FBillDate,FDocumentStatus,FStockOrgId.FName,"
-                "FOutStockId.FName,FInStockId.FName,FTransferType,"
-                "FMaterialId.FNumber,FMaterialId.FName,FUnitId.FName,FQty,FPrice,FAmount"
+                "FID,FBillNo,FDate,FDocumentStatus,FAPPORGID.FName,"
+                "FMATERIALID.FNumber,FMATERIALID.FName,"
+                "FStockId.FName,FStockInId.FName,"
+                "FUNITID.FName,FQty"
             )
         result = await _post("query", _query_payload(
             "STK_TransferApply", fk, params.filter_string,
@@ -6146,15 +6154,15 @@ async def kingdee_query_transfer_direct(params: QueryInput) -> str:
 
     常用 filter_string：
     - 已审核: "FDocumentStatus='C'"
-    - 指定日期范围: "FBillDate>='2024-01-01' and FBillDate<='2024-12-31'"
-    - 指定调出仓库: "FOutStockId.FNumber='WH01'"
-    - 指定调入仓库: "FInStockId.FNumber='WH02'"
+    - 指定日期范围: "FDate>='2024-01-01' and FDate<='2024-12-31'"
+    - 指定调出仓库: "FSrcStockId.FNumber='WH01'"
+    - 指定调入仓库: "FDestStockId.FNumber='WH02'"
     - 未关闭: "FCloseStatus='A' and FBusinessClose='A'"
 
     推荐 field_keys（默认已包含关键字段）：
-    FID,FBillNo,FBillDate,FDocumentStatus,FStockOrgId.FName,
-    FOutStockId.FName,FInStockId.FName,FMaterialId.FNumber,
-    FMaterialId.FName,FUnitId.FName,FQty,FPrice,FAmount
+    FID,FBillNo,FDate,FDocumentStatus,FStockOrgId.FName,
+    FMaterialId.FNumber,FMaterialId.FName,FSrcStockId.FName,
+    FDestStockId.FName,FUnitID.FName,FQty,FPrice,FAmount
 
     Returns:
         str: JSON 格式的直接调拨单列表
@@ -6162,9 +6170,10 @@ async def kingdee_query_transfer_direct(params: QueryInput) -> str:
     try:
         fk = params.field_keys if params.field_keys != "FID,FBillNo,FDate,FDocumentStatus" \
             else (
-                "FID,FBillNo,FBillDate,FDocumentStatus,FStockOrgId.FName,"
-                "FOutStockId.FName,FInStockId.FName,FMaterialId.FNumber,"
-                "FMaterialId.FName,FUnitId.FName,FQty,FPrice,FAmount"
+                "FID,FBillNo,FDate,FDocumentStatus,FStockOrgId.FName,"
+                "FMaterialId.FNumber,FMaterialId.FName,"
+                "FSrcStockId.FName,FDestStockId.FName,"
+                "FUnitID.FName,FQty,FPrice,FAmount"
             )
         result = await _post("query", _query_payload(
             "STK_TransferDirect", fk, params.filter_string,

@@ -21,7 +21,9 @@ from kingdee_mcp.server import (
     MaterialQueryInput, PartnerQueryInput, InventoryQueryInput,
     FormSearchInput, FieldQueryInput,
     kingdee_list_forms, kingdee_get_fields,
+    _get_session_lock,
 )
+import kingdee_mcp.server as _srv
 
 
 # ─── Pydantic 模型验证测试 ───────────────────────────────
@@ -245,3 +247,78 @@ class TestErrorPatternMatching:
         m = _match_known_pattern("出现了 旧式三参pattern")
         assert m is not None
         assert "next_action_tool" not in m
+
+
+# ─── 并发登录锁测试 ──────────────────────────────────────
+
+class TestConcurrentLogin:
+    """验证并发请求只触发一次 _login()，不会并发打爆金蝶登录接口。"""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_requests_call_login_only_once(self):
+        """7 个协程同时发现 _session_id 为 None，加锁后只有第一个真正调用 _login()。"""
+        login_call_count = 0
+
+        async def fake_login():
+            nonlocal login_call_count
+            # 模拟网络延迟，给其他协程机会抢入
+            await asyncio.sleep(0.01)
+            login_call_count += 1
+            _srv._session_id = "fake-session-xyz"
+
+        # 重置全局状态
+        original_session = _srv._session_id
+        original_lock = _srv._session_lock
+        _srv._session_id = None
+        _srv._session_lock = None  # 让 _get_session_lock() 重建锁
+
+        try:
+            with patch.object(_srv, "_login", side_effect=fake_login):
+                # 模拟 7 个协程同时检查并登录（复现原始 bug 场景）
+                async def one_request():
+                    async with _get_session_lock():
+                        if not _srv._session_id:
+                            await _srv._login()
+
+                await asyncio.gather(*[one_request() for _ in range(7)])
+
+            # 核心断言：无论并发数量，_login() 只被调用一次
+            assert login_call_count == 1, (
+                f"_login() 被调用了 {login_call_count} 次，期望 1 次。"
+                "并发登录 bug 未修复。"
+            )
+            assert _srv._session_id == "fake-session-xyz"
+        finally:
+            _srv._session_id = original_session
+            _srv._session_lock = original_lock
+
+    @pytest.mark.asyncio
+    async def test_lock_is_reentrant_safe_after_session_set(self):
+        """session 已存在时，多个并发协程不触发 _login()。"""
+        login_call_count = 0
+
+        async def fake_login():
+            nonlocal login_call_count
+            login_call_count += 1
+            _srv._session_id = "existing-session"
+
+        original_session = _srv._session_id
+        original_lock = _srv._session_lock
+        _srv._session_id = "existing-session"
+        _srv._session_lock = None
+
+        try:
+            with patch.object(_srv, "_login", side_effect=fake_login):
+                async def one_request():
+                    async with _get_session_lock():
+                        if not _srv._session_id:
+                            await _srv._login()
+
+                await asyncio.gather(*[one_request() for _ in range(7)])
+
+            assert login_call_count == 0, (
+                "session 已存在时不应调用 _login()"
+            )
+        finally:
+            _srv._session_id = original_session
+            _srv._session_lock = original_lock
