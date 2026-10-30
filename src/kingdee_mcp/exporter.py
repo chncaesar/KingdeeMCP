@@ -252,6 +252,28 @@ async def _captions(form_id: str) -> Dict[str, str]:
         return {}
 
 
+# 点号字段（FSupplierId.FName 等）的元数据只登记基础资料字段，
+# 列注释用「基础字段注释 + 后缀说明」兜底。
+_CAPTION_SUFFIXES = (
+    ("_fname", "（名称）"),
+    ("_fnumber", "（编码）"),
+    ("_fdatavalue", "（值）"),
+    ("_fspecification", "（规格型号）"),
+)
+
+
+def _caption_for(captions: Dict[str, str], column: str) -> str:
+    cap = captions.get(column, "")
+    if cap:
+        return cap
+    for suffix, label in _CAPTION_SUFFIXES:
+        if column.endswith(suffix):
+            base = captions.get(column[: -len(suffix)], "")
+            if base:
+                return base + label
+    return ""
+
+
 def _ddl(s: dict, drop: bool) -> str:
     cols = ",\n  ".join(
         f"{_q(c)} {s['types'][c]}" for c in s["columns"]
@@ -328,7 +350,7 @@ def _verify(s: dict, captions: Dict[str, str]) -> dict:
                 )
                 cur.execute(f"COMMENT ON TABLE {fqtn} IS %s", (table_comment,))
                 for c in s["columns"]:
-                    cap = captions.get(c, "")
+                    cap = _caption_for(captions, c)
                     if cap:
                         cur.execute(
                             f"COMMENT ON COLUMN {fqtn}.{_q(c)} IS %s", (cap,)

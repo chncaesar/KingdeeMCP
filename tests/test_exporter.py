@@ -109,6 +109,16 @@ def test_ddl_upsert_has_primary_key_and_no_drop():
     assert 'PRIMARY KEY ("a")' in sql
 
 
+# ── 列注释兜底 ──────────────────────────────────────────────
+
+def test_caption_for_dotted_lookup_fields():
+    caps = {"fsupplierid": "供应商", "fmaterialid": "物料编码", "fbillno": "单据编号"}
+    assert ex._caption_for(caps, "fsupplierid_fname") == "供应商（名称）"
+    assert ex._caption_for(caps, "fmaterialid_fnumber") == "物料编码（编码）"
+    assert ex._caption_for(caps, "fbillno") == "单据编号"
+    assert ex._caption_for(caps, "fid") == ""
+
+
 # ── 注册 ────────────────────────────────────────────────────
 
 class _FakeMCP:
