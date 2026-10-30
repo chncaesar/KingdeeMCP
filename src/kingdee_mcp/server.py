@@ -7358,5 +7358,23 @@ def _run_server(transport: str) -> None:
         mcp.run(transport=fallback)
 
 
+
+# ─────────────────────────────────────────────
+# 金蝶 → PostgreSQL 分块导出工具（可选依赖 psycopg2）
+# ─────────────────────────────────────────────
+try:
+    from .exporter import register as _register_exporter
+    _register_exporter(
+        mcp=mcp, post=_post, rows=_rows, fmt=_fmt, err=_err,
+        query_metadata=_query_metadata, validator_cls=MetadataValidator,
+    )
+except Exception as _exporter_import_error:  # pragma: no cover
+    import sys as _sys
+    print(
+        f"[WARN] kingdee_export_* 工具未加载（需要 psycopg2）：{_exporter_import_error}",
+        file=_sys.stderr,
+    )
+
+
 if __name__ == "__main__":
     main()

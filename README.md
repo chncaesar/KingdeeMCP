@@ -256,6 +256,32 @@ uvx kingdee-mcp --transport streamable-http --host 0.0.0.0 --port 8000
 反审核销售订单 SO2024001
 ```
 
+## 金蝶 → PostgreSQL 分块导出（可选）
+
+把任意金蝶单据导出到 PostgreSQL，分三步调用，避免单次工具调用长时间阻塞：
+
+1. `kingdee_export_plan` — 探测字段有效性（自动剔除无效字段并回报），生成建表 DDL；**不落库**
+2. `kingdee_export_chunk` — 按游标取一页写入（默认 2000 行，首块建表），返回进度
+3. `kingdee_export_finish` — 校验行数与主键唯一性，写入表/列注释并结束会话
+
+特点：
+
+- 只读金蝶：仅使用 `ExecuteBillQuery`，不调用任何保存/提交/审核/下推/删除接口
+- 服务端内部按 2000 行/页取数，不受 `kingdee_query_bills` 单次 100 行限制
+- 默认全部落为 `text`（WebAPI 只返回字符串），需要类型时用 `types` 显式指定，
+  例如 `fcustid:bigint,fmodifydate:timestamp`
+- 默认只允许写本机数据库；远程需显式 `allow_remote=true`
+- 每块一个事务，失败整块回滚、游标不推进，可安全重试
+
+安装可选依赖：
+
+```bash
+pip install -e '.[export]'
+```
+
+示例参数：`form_id=AP_Payable`、`fields=FID,FBillNo,FDate`、
+`order_string=FID ASC`、`table=ap_payable_tmp_20261030`、`pk=fid`。
+
 ## SQL Server 探查工具（可选）
 
 配置 `MCP_SQLSERVER_*` 环境变量后可用，帮助理解金蝶数据库结构：

@@ -35,6 +35,10 @@ test = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
 ]
+# 金蝶 → PostgreSQL 分块导出工具（kingdee_export_plan/chunk/finish）
+export = [
+    "psycopg2-binary>=2.9",
+]
 
 [project.urls]
 Homepage = "https://github.com/WaHaiLong/KingdeeMCP"

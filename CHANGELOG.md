@@ -12,6 +12,7 @@
 
 ### Added（新增）
 
+- **金蝶 → PostgreSQL 分块导出工具**：新增 `kingdee_export_plan` / `kingdee_export_chunk` / `kingdee_export_finish` 三个工具。先规划（探测字段有效性、生成建表 DDL，不落库），再按 2000 行/页分块写入，最后校验行数与主键唯一性并写表/列注释。仅调用 `ExecuteBillQuery`（不写金蝶）；默认落 `text`，可用 `types` 显式声明类型；默认只允许写本机数据库（`allow_remote` 可放开）。可选依赖：`pip install -e '.[export]'`。
 - **远程传输支持（HTTP / SSE / Streamable HTTP）**：`main()` 新增 `--transport`（stdio/sse/streamable-http，默认 stdio）、`--host`、`--port` 参数，并支持同名环境变量 `KINGDEE_MCP_TRANSPORT` / `KINGDEE_MCP_HOST` / `KINGDEE_MCP_PORT`。现在可将服务以 SSE（`/sse`）或 Streamable HTTP（`/mcp`）模式运行，便于部署到服务器或网关平台远程调用、免客户端安装。兼容老版本 mcp（<1.9 不支持 streamable-http 时自动回退 sse）。
 
 ---
